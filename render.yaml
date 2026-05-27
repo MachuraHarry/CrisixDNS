@@ -1,0 +1,33 @@
+# Render.com Deployment Config für Crisix DNS Tunnel Server
+# 
+# Deployment:
+# 1. Dieses Repo auf GitHub pushen
+# 2. Auf render.com: "New Web Service" → "Deploy from Git"
+# 3. Repo auswählen, Branch: main
+# 4. Runtime: Docker
+# 5. Service Name: crisix-dns
+# 6. Region: Frankfurt (europe-west)
+# 7. Plan: Free
+# 8. Health Check Path: /health
+# 9. Environment Variables:
+#    - SERVER_DOMAIN: crisix-dns.onrender.com
+#    - DNS_PORT: 8053
+#    - HTTP_PORT: 8080
+
+services:
+  - type: web
+    name: crisix-dns
+    runtime: docker
+    repo: https://github.com/MachuraHarry/Crisix
+    branch: main
+    dockerfilePath: ./dns-tunnel-server/Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: SERVER_DOMAIN
+        value: crisix-dns.onrender.com
+      - key: DNS_PORT
+        value: "8053"
+      - key: HTTP_PORT
+        value: "8080"
+    # Render Free Tier: Service schläft nach 15min Inaktivität
+    # Aber: Healthcheck hält ihn wach
