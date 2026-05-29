@@ -41,6 +41,7 @@ from aiohttp import web
 SERVER_DOMAIN = os.environ.get("SERVER_DOMAIN", "crisix-dns.onrender.com")
 DNS_PORT = int(os.environ.get("DNS_PORT", "8053"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
+# WebSocket läuft auf demselben HTTP-Port (8080)
 MAX_MSG_LENGTH = 200  # Max Zeichen Klartext
 CLEANUP_INTERVAL = 300  # Alte Nachrichten alle 5min löschen
 MSG_TTL = 3600  # Nachrichten 1h aufbewahren
@@ -502,6 +503,90 @@ async def cleanup_old_messages():
             print(f"[CLEANUP] {total_deleted} alte Nachrichten gelöscht")
 
 
+# ─── WebSocket-Relay (läuft auf demselben HTTP-Port 8080) ─────────────────────
+
+relay_clients: dict = {}  # { peer_id: web.WebSocketResponse }
+relay_lock = asyncio.Lock()
+
+
+async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
+    """WebSocket-Endpoint für den Relay-Transport."""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    peer_id = None
+    addr = request.remote
+
+    try:
+        async for msg in ws:
+            if msg.type != web.WSMsgType.TEXT:
+                continue
+
+            raw = msg.data.strip()
+            if not raw:
+                continue
+
+            if raw.startswith("REGISTER:"):
+                peer_id = raw[len("REGISTER:"):]
+                if not peer_id:
+                    await ws.send_str("ERROR:empty-peer-id")
+                    continue
+
+                async with relay_lock:
+                    old = relay_clients.get(peer_id)
+                    if old and not old.closed:
+                        await old.close()
+                    relay_clients[peer_id] = ws
+
+                await ws.send_str("OK:registered")
+                print(f"[WS] Peer registriert: {peer_id} ({addr})")
+
+            elif raw.startswith("SEND:"):
+                if not peer_id:
+                    await ws.send_str("ERROR:not-registered")
+                    continue
+
+                rest = raw[len("SEND:"):]
+                sep = rest.find(":")
+                if sep < 0:
+                    await ws.send_str("ERROR:invalid-format")
+                    continue
+
+                target_peer_id = rest[:sep]
+                b64_data = rest[sep + 1:]
+
+                async with relay_lock:
+                    target_ws = relay_clients.get(target_peer_id)
+
+                if target_ws is None or target_ws.closed:
+                    await ws.send_str(f"ERROR:peer-not-connected:{target_peer_id}")
+                    continue
+
+                try:
+                    await target_ws.send_str(f"FROM:{peer_id}:{b64_data}")
+                    await ws.send_str("OK:sent")
+                    print(f"[WS] {peer_id} → {target_peer_id}: {len(b64_data)} Bytes (base64)")
+                except Exception as e:
+                    print(f"[WS] Fehler beim Weiterleiten an {target_peer_id}: {e}")
+                    async with relay_lock:
+                        if relay_clients.get(target_peer_id) == target_ws:
+                            relay_clients.pop(target_peer_id, None)
+                    await ws.send_str(f"ERROR:delivery-failed:{target_peer_id}")
+
+            else:
+                await ws.send_str("ERROR:unknown-command")
+
+    except Exception as e:
+        print(f"[WS] Fehler mit {addr}: {e}")
+    finally:
+        if peer_id:
+            async with relay_lock:
+                if relay_clients.get(peer_id) == ws:
+                    relay_clients.pop(peer_id, None)
+            print(f"[WS] Peer getrennt: {peer_id} ({addr})")
+
+    return ws
+
+
 # ─── Hauptprogramm ───────────────────────────────────────────────────────────
 
 async def main():
@@ -510,10 +595,12 @@ async def main():
     print(f"📡 Domain: {SERVER_DOMAIN}")
     print(f"🔌 DNS-Port: {DNS_PORT} (UDP)")
     print(f"🌐 HTTP-Port: {HTTP_PORT}")
+    print(f"🔗 WebSocket-Relay: /ws (Port {HTTP_PORT})")
     print("=" * 50)
 
     # HTTP-App
     app = web.Application()
+    app.router.add_get("/ws", handle_websocket)
     app.router.add_get("/dns-query", handle_http_dns)
     app.router.add_post("/dns-query", handle_http_dns)
     app.router.add_get("/health", handle_health)

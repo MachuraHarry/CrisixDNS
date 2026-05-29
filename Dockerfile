@@ -18,6 +18,7 @@ COPY dns_server.py .
 EXPOSE 8053/udp
 EXPOSE 8080/tcp
 
+
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
