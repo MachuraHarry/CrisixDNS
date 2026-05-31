@@ -572,6 +572,11 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
                             relay_clients.pop(target_peer_id, None)
                     await ws.send_str(f"ERROR:delivery-failed:{target_peer_id}")
 
+            elif raw.startswith("KEEPALIVE:"):
+                # Keepalive-Ping vom Client ignorieren, aber nicht als Fehler behandeln
+                await ws.send_str("OK:keepalive")
+                print(f"[WS] Keepalive von {peer_id}")
+
             else:
                 await ws.send_str("ERROR:unknown-command")
 
