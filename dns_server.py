@@ -507,6 +507,9 @@ async def cleanup_old_messages():
 
 relay_clients: dict = {}  # { peer_id: web.WebSocketResponse }
 relay_lock = asyncio.Lock()
+short_id_map: dict = {}   # { shortId: {"peerId": str, "host": str, "port": int} }
+short_id_lock = asyncio.Lock()
+SHORT_ID_TTL = 60 * 30    # 30 Minuten, wird bei Re-Announce erneuert
 
 
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
@@ -572,10 +575,39 @@ async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
                             relay_clients.pop(target_peer_id, None)
                     await ws.send_str(f"ERROR:delivery-failed:{target_peer_id}")
 
-            elif raw.startswith("KEEPALIVE:"):
-                # Keepalive-Ping vom Client ignorieren, aber nicht als Fehler behandeln
-                await ws.send_str("OK:keepalive")
-                print(f"[WS] Keepalive von {peer_id}")
+            elif raw.startswith("SHORT_ID_ANNOUNCE:"):
+                rest = raw[len("SHORT_ID_ANNOUNCE:"):]
+                parts = rest.split(":", 3)
+                if len(parts) < 4:
+                    await ws.send_str("ERROR:invalid-short-id-announce")
+                    continue
+                sid, pid, host, port = parts[0], parts[1], parts[2], parts[3]
+                async with short_id_lock:
+                    short_id_map[sid] = {"peerId": pid, "host": host, "port": int(port), "ts": asyncio.get_event_loop().time()}
+                await ws.send_str("OK:short-id-announced")
+                print(f"[WS] Kurz-ID registriert: {sid} → {pid} ({host}:{port})")
+
+            elif raw.startswith("SHORT_ID_LOOKUP:"):
+                sid = raw[len("SHORT_ID_LOOKUP:"):]
+                if not sid:
+                    await ws.send_str("ERROR:empty-short-id")
+                    continue
+                async with short_id_lock:
+                    entry = short_id_map.get(sid)
+                    if entry:
+                        elapsed = asyncio.get_event_loop().time() - entry.get("ts", 0)
+                        if elapsed > SHORT_ID_TTL:
+                            del short_id_map[sid]
+                            entry = None
+                if entry:
+                    pid = entry["peerId"]
+                    host = entry["host"]
+                    port = entry["port"]
+                    await ws.send_str(f"SHORT_ID_RESULT:{sid}:{pid}:{host}:{port}")
+                    print(f"[WS] Kurz-ID-Lookup {sid} → {pid} ({host}:{port})")
+                else:
+                    await ws.send_str(f"SHORT_ID_NOT_FOUND:{sid}")
+                    print(f"[WS] Kurz-ID {sid} nicht gefunden")
 
             else:
                 await ws.send_str("ERROR:unknown-command")
